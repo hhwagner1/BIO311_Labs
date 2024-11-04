@@ -1,0 +1,703 @@
+---
+title: "Landscape Metrics Lab"
+author: Helene Wagner
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+always_allow_html: true
+---
+
+# 1. Introduction
+
+## a) Goals at the conceptual level
+
+- Get hands-on experience with calculating and interpreting landscape metrics.
+- Relate them to own experience (neighbourhood - where we live also shapes our lived experience)
+- Explore the range of neighbourhoods our class lives in
+- Interactively interpret landscapes within the Credit River watershed that have been delineated with the Ecolandscapes approach, as an application of landscape metrics. 
+
+## b) Goals at the technical level (GIS with R)
+
+- Download and import spatial data from the internet.
+- Rasterize polygon data.
+- Delineate patches. 
+- Calculate patch-level and class-level landscape metrics.
+- Visualize spatial results in an interactive map.
+- Perform moving (sliding) window analysis and interpret results.
+- Use an interactive map to make sense of spatial data.
+
+## c) Prepare R project folder
+
+- **Important**: If working on a Windows machine (lab computers), select the newest R version when prompted! Some packages won't work with the older ones. 
+- In RStudio, create a R project for this lab: File > New project ... 
+- In this folder, create a sub-folder 'data'. 
+- Copy the .csv file from the first lab (with the spatial coordinates of the nearest intersection) into the 'data' folder. 
+
+## d) Land use /land cover data
+
+We will use polygon data (*Ecological Land Classification (ELC) and Land Use (2022)*) publicly available from the Credit Valley Conservation Open Data Hub.
+
+Download instructions:
+
+- Go to the website: https://cvc-camaps.opendata.arcgis.com/datasets/165f36ed44294d9e90486e35dea426a5/explore
+- Click on "Download"
+- Select the download option for "Shapefile". Save it to the "Downloads" folder.
+- Unzip the archive and extract the files. This will create a folder "ELC_and_Land_Use_2022_-4248462527224701921".
+- Move or copy the folder "ELC_and_Land_Use_2022_-4248462527224701921" to the 'data' folder in your R project folder. 
+- Open the folder and check that it contains the `.shp` file and some other files, including `.proj`.
+
+## e) Landscape classification
+
+Please download the following zip archive from the Quercus page for this lab to the downloads folder, unzip it (extract the files), and copy the extracted folder (with all components of the shapefile) into the data folder.
+
+## f) Install and load R packages
+
+The following code will check whether the necessary packages are installed and, if not, install them.
+
+```{r message=FALSE}
+Packages <- c("dplyr", "sf", "terra", "tmap", "landscapemetrics", "RColorBrewer")
+lapply(Packages, function(x) {
+    if (!require(x, character.only = TRUE)) {install.packages(x, dependencies = TRUE)}})
+```
+
+Load required packages.
+
+```{r message=FALSE}
+library(dplyr)
+library(sf)
+library(terra)
+library(tmap)
+#library(chloe)
+library(landscapemetrics)
+library(RColorBrewer)
+```
+
+# 2. Prepare Data
+
+## a) Import the shapefile
+
+Notes:
+
+- We use the R package `sf` to handle spatial vector data.
+- As long as the code file (`.Rmd`) is in the project folder itself and not in a sub-folder, we only need to specify the file path relative to the project folder. I.e., we don't need to tell R how to find the R project folder. 
+- We specify the `.shp` file, R will look for and find the other files as well.
+
+```{r}
+ELC.sf <- sf::st_read("data/ELC_and_Land_Use_2022_-4248462527224701921/Ecological_Land_Classification_ELC_and_Land_Use_2022.shp") 
+ELC.sf <- st_make_valid(ELC.sf )
+```
+### **Question 1**
+
+- What information can you glean from this summary? (see previous lab). 
+
+
+Let's list the variables:
+
+```{r}
+names(ELC.sf)
+```
+
+We will be focusing on the variable "TYPE". Let's look at it's categories:
+
+```{r}
+unique(ELC.sf$TYPE)
+```
+
+Wow, that is a lot of categories! We may need to simplify this a bit later on.
+
+## b) Import your spatial location data
+
+The code below assumes that your file is called "MyPoints.csv" and is located in the 'data' folder. Change the code as necessary to import your file.
+
+```{r}
+MyPoints <- read.csv("data/MyPoints.csv")
+```
+ 
+We will add the coordinates of UTM campus just in case your intersection falls outside of the area covered by the ELC dataset. 
+
+```{r}
+MyPoints <- rbind(MyPoints, c("UTM", 43.54910940, -79.6636611))
+MyPoints
+```
+
+R does not yet know that Longitude and Latitude are spatial coordinates, nor what projection they represent (Google Maps uses "Web-Mercator", with EPSG code 4326). We need to convert the data frame into a spatial features (sf) object.
+
+```{r}
+MyPoints.sf <- st_as_sf(MyPoints, coords=c("Longitude", "Latitude"), crs=4326)
+```
+
+Now that R knows the coordinates are the variables `Longitude` (x) and `Latitude` (y) and that they are expressed with the coordinate reference system (CRS) defined by EPSG = 4326, we can change the projection to match `ELC.sf`. 
+
+```{r}
+MyPoints.sf <- st_transform(MyPoints.sf, crs=st_crs(ELC.sf))
+MyPoints.sf
+```
+
+# 3. Explore your neighbourhood
+
+## a) Create buffer
+
+Create a circular buffer of 1-km radius around the location of your nearest intersection.
+
+The code below (`Line = 8`) assumes that the intersection is the 8th point. Replace this to match your dataset, e.g., set `Line = 1` to select your nearest intersection (with the label being your pseudonym) if you live within the Credit River watershed (spatial extent of the ELC dataset). Or if UTM is on a different line in your dataset, adapt the code accordingly.
+
+```{r}
+Line = 8 # Change this e.g. to Line = 1 to use the intersection
+Buffer.sf <- st_buffer(MyPoints.sf[Line,], dist=1000) %>% st_make_valid()
+```
+
+## b) Intersect the buffer with the ELC data.
+
+We extract only the polygons that fall within the buffer. 
+
+```{r warning=FALSE}
+ELC.buffer <- st_intersection(ELC.sf, Buffer.sf) %>% st_make_valid()
+```
+
+## c) Plot the map of local ELC on an interactive map
+
+- We will use functions from package `tmap` to create maps. Here we specify that we want to create an interactive map (`tmap_mode("view")`). We could change this to plotting a static map (`tmap_mode("plot")`).
+- Similarly to ggplot2, we will need two functions to display any data layer:
+  - `tm_shape`: the first function defines the data to be plotted. This part is always the function `tm_shape`, and it has a similar function as `ggplot(data, aes())` in `ggplot2` in defining what will be mapped. 
+  - `tm_sf`: we use the second function to tell `tmap` what kind of plot to create. Here we want to plot the attribute "TYPE" with the default plotting type (polygons as `ELC.buffer` contains `sf` objects of the type `POLYGON`). There are many functions we can use for this second component, e.g., there is also a function `tm_polygons`. This part is thus similar to `geom_` functions in `ggplot2`, which define how the data should be visually represented.
+
+```{r}
+tmap_mode("view")
+tm_shape(ELC.buffer) + tm_sf("TYPE")
+```
+Is that cool or what?
+
+Hint: use the layers symbol below the +/- zoom symbols to toggle between three default base maps.
+
+Let's improve this map a bit:
+
+- Add a satellite basemap and use it as default.
+- Make the ELC data layer "TYPE" semi-transparent: set `alpha=0.5`.
+- Omit the legend as it is getting in the way.
+
+```{r}
+tmap_options(basemaps = c(Imagery = "Esri.WorldImagery",
+                          Canvas = "Esri.WorldGrayCanvas")) 
+tm_shape(ELC.buffer) + tm_sf("TYPE", alpha=0.5, legend.show = FALSE)            
+```
+
+Hint: to get a larger area for the map, you may copy-paste the code to create the map into the console and then make the Plots tab larger.
+
+Click on some polygons to check what TYPE they are. 
+
+### **Question 2** 
+
+a) What is the ELC category (TYPE) for the polygon that contains the house where you live (or the building at UTM that you are in right now)? 
+b) Do you think this classification is correct?
+c) Check whether all streets in your neighborhood are mapped as a type of road. What do you notice?
+d) If you have a garden/yard around your house (or you know one in your neighborhood), how has that area been classified?
+
+# 4. Analyze landscape composition 
+
+## a) Rasterize polygon data
+
+Landscape metrics were developed for raster data, hence we first need to rasterize the polygon data. We will do this for two different spatial resolutions (grain): 10 m and 30 m, similar to the remote sensing data we used earlier.
+
+**Important**: we need to define TYPE as a factor so that R recognizes that this is a categorical raster. It will give each category a number and store that number for each raster cell. We can then use the function `levels` to see what number represents which category.  
+
+```{r}
+ELC.buffer <- ELC.buffer %>% mutate(TYPE = factor(TYPE))
+
+template.10 <- rast(extent=ext(vect(ELC.buffer)), resolution=10, crs=crs(vect(ELC.buffer)))
+ELC.r10 <- terra::rasterize(ELC.buffer, template.10, "TYPE")
+
+template.30 <- rast(extent=ext(vect(ELC.buffer)), resolution=30, crs=crs(vect(ELC.buffer)))
+ELC.r30 <- terra::rasterize(ELC.buffer, template.30, "TYPE")
+
+levels(ELC.r30)
+```
+Hint: The notebook shows data frames as tibbles and displays only the first 10 rows. You can click on page numbers or "Next" or "Previous" on the lower right to view the remaining rows. 
+
+Let's plot the two rasters.
+
+```{r}
+par(mfrow=c(1,2))
+plot(ELC.r10, legend=FALSE)
+plot(ELC.r30, legend=FALSE)
+```
+
+### **Question 3**
+
+- Do you see a difference between the two raster maps in how linear features (roads, rivers, etc.) show up? 
+- Focus on the streets that were mapped as polygons (Q2.c). Do you have any concerns about this?
+
+## b) Create forest raster map
+
+We will want to quantify the amount (composition) and spatial configuration of forest within this local landscape. For this, we first need to reclassify all types that we consider "forest". Here, we will use a search strategy to identify the relevant categories of 'TYPE' based on whether their labels contain any of the words "forest", "treed", or "plantation". Let's see which categories of TYPE within your local landscape match these criteria:
+
+```{r}
+Types <- unique(ELC.buffer$TYPE)
+matches <- grep(c("forest|treed|plantation"), Types, value=TRUE, ignore.case=TRUE)
+matches
+```
+
+Create a new raster `Forest` where all "forest" cells (defined by "matches") have the value 1 and all other cells have the value 0. In this example, it is easiest to do this with the polygon map and rasterize the attribute `Forest` separately.
+
+- The pipe symbol (`%>%`) of the R package `dplyr` means "and then do this".
+- We use the function `mutate` here to create a new variable `Forest`. 
+- We use the condition `ifelse` to specify that we want to assign the value 1 if the condition is met and the value 0 if not. The condition is `is.element(TYPE, matches)`, i.e., R will check whether the value of TYPE for a given polygon is listed in the object `matches` created above. 
+
+```{r}
+ELC.buffer <- ELC.buffer %>% mutate(Forest=ifelse(is.element(TYPE, matches), 1, 0))
+Forest.r10 <- terra::rasterize(ELC.buffer, template.10, "Forest")
+Forest.r30 <- terra::rasterize(ELC.buffer, template.30, "Forest")
+```
+
+Let's check our forest map. Unfortunately, plotting the raster as semi-transparent does not work easily at this time. However, we can set the values of 0 to NA (in a new copy `Forest.r10.mask`) so that they won't be plotted.
+
+```{r}
+Forest.r10.mask <- Forest.r10
+Forest.r10.mask[Forest.r10 == 0] <- NA
+tmap_mode("view")
+tm_shape(Forest.r10.mask) + tm_raster(palette=c("forestgreen"))
+```
+
+## c) Determine percent forest cover
+
+Our forest raster maps are binary spatial variables coded as 1 (forest) and 0 (not forest). We can determine the percent forest cover by taking the mean of this variable:
+
+- The sum of all non-missing values gives the number of forest cells.
+- The total number of values gives the number of non-missing cells.
+- The ratio of the two gives the proportion of cells with non-missing values that are forested.
+- Mathematically, this is the same as the mean of the variable as long as the variable is coded 1/0. 
+
+```{r}
+Forest.percent.Method1 = mean(values(Forest.r10), na.rm=TRUE)
+Forest.percent.Method1
+```
+
+## d) Determine landscape composition
+
+We can calculate the same with the function `pland` (percent of landscape) of the R package `landscapemetrics`. It will return `pland` for each ELC types in your neighbourhood. To interpret the results, we need to join the resulting table with the category labels. Also, we will repeat the analysis for 10m and 30 m resolution and put everything in a single results table.
+
+```{r}
+ELC.pland.10 <- landscapemetrics::lsm_c_pland(ELC.r10) %>% rename(pland.10=value)
+ELC.pland.30 <- landscapemetrics::lsm_c_pland(ELC.r30) %>% rename(pland.30=value)
+
+# Extract only the variables we are interested in:
+Results <- data.frame(ELC.pland.10 %>% select(class, metric, pland.10),
+                      ELC.pland.30 %>% select(pland.30))
+Results <- dplyr::left_join(levels(ELC.r10)[[1]], Results, by=c("ID"="class"))
+Results
+```
+
+### **Question 4**
+
+a) What are the most frequent ELC Types in your neighborhood?
+  - Which non-greenspace type is most frequent?
+  - Which type of forest or other type greenspace is most frequent?
+b) Did either of these show a big difference in pland depending on the spatial grain (10 m vs. 30 m)? 
+c) Check for linear features, such as roads. Do you see a big difference depending on the spatial grain?
+
+# 5. Analyze spatial configuration
+
+## a) Delineate patches
+
+The first step in analyzing spatial configuration is to delineate patches. A patch is thus defined as a group of connected cells of the same class (type). What we have to decide on is how we define "connected":
+
+- 4-neighbour rule: all cells that can be reached by moving only across edges shared by two cells of the same type.
+- 8-neighbour rule: all cells that can be reached by moving only across edges or corners shared by two cells of the same type. 
+
+Let's illustrate the difference with our forest map.
+
+```{r}
+Forest.r30.patches.8nb <- get_patches(Forest.r30, class = 1, directions=8) 
+                      
+tm_shape(as.factor(Forest.r30.patches.8nb$layer_1$class_1)) + 
+  tm_raster(legend.show=TRUE)
+```
+
+### **Question 5** 
+
+In this figure, each forest patch has a different color, and patches were delineated with the 8-neighbour rule. Look for narrow bands or diagonal rows of forest cells, where some of the connections are through the edge only. If we used the 4-neighbour rule instead, what would you expect to see?
+
+
+```{r}
+Forest.r30.patches.4nb <-get_patches(Forest.r30, class = 1, directions=4)
+
+tmap_options(max.categories =nrow(terra::unique(Forest.r30.patches.4nb$layer_1$class_1)))
+
+tm_shape(as.factor(Forest.r30.patches.4nb$layer_1$class_1)) +
+  tm_raster(legend.show=FALSE)
+```
+
+Find the same area again as above and check whether you were right!
+
+Let's count the number of patches for the two maps of forest patches.
+
+```{r}
+c(nPatches.8nb=nrow(terra::unique(Forest.r30.patches.8nb$layer_1$class_1)),
+  nPatches.4nb=nrow(terra::unique(Forest.r30.patches.4nb$layer_1$class_1)))
+```
+
+## b) Core area
+
+Is there any forest interior (core) area in your neighbourhood? A common criterion for defining forest interior is a minimum distance (edge depth) of 100 from the forest edge. 
+
+Note: the argument `edge_depth` is expressed as the number of cells! Thus, for the 10 m raster, a 100 m edge distance corresponds to 10 cells, i.e., `edge_depth=10`. 
+
+```{r}
+Core_areas <- landscapemetrics::lsm_p_core(Forest.r10, directions=8, edge_depth=10) 
+Core_areas %>% filter(class==1) # Select only forest patches, not non-forest patches.
+```
+ 
+### **Question 6**
+
+The units are in hectares (ha), where 1 ha = 100 m x 100 m = 10,000 m2 = 0.01 km2. 
+
+- How large is the largest forest interior (core) area in your neighborhood? 
+- Do you think you know which forest patch that would be?
+
+**Note**: If there was no patch with interior area in your local landscape, change the edge distance to 30 m (`edge_depth=3`) and repeat.
+ 
+
+Let's check. With the function `spatialize_lsm` of the `landscapemetrics` package we can plot the results in space. All forest patches are plotted (we use `Forest.r10.mask` to remove the non-forest patches from plotting), and the color of a patch indicates the amount of interior (core) area of the patch. 
+ 
+```{r}
+Core_areas.r10 <- spatialize_lsm(Forest.r10, what = "lsm_p_core", 
+                                 directions=8, edge_depth=10)
+
+tm_shape(Forest.r10.mask * Core_areas.r10$layer_1$lsm_p_core) + tm_raster()
+```
+ 
+To visualize the actual core areas, it is best to return to the polygon data, as we have them available. We create a buffer for each forest polygon, with a negative distance of -100 (or -30 if you used 30 m edge distance). This means that we go inside the patch from the patch boundary, rather than outside, and thus create an inner buffer. Note that here, we specify the edge distance in meters, not in cells (we are working with the polygon map, not the raster).  
+
+```{r}
+Forest.interior <- ELC.buffer %>% filter(Forest==1) %>% 
+  st_combine() %>% st_make_valid %>% st_buffer(dist=-100)
+```
+
+
+```{r}
+tm_shape(Forest.r10.mask * Core_areas.r10$layer_1$lsm_p_core) + tm_raster() +
+  tm_shape(st_union(Forest.interior)) + tm_sf("green")
+```
+
+## c) Road network
+
+The spatial continuity of a 'class' (type) can be quantified e.g. with the mean radius of gyration. First, we classify all road cells (of various road types) as "Roads". These are the steps done by the following chunk of code:
+
+- Identify which rows (`b`) in the table of levels of TYPE correspond to roads. 
+- Get the corresponding ID values with `ID[b]`.
+- Set all raster values that are not roads to NA.
+- Set all remaining raster values to 1.
+
+We do this for both spatial grains and plot the two maps.
+
+```{r}
+b <- which(is.element(levels(ELC.r10)[[1]]$TYPE, 
+                 c("Collector","Regional road", "Highway")))
+
+Roads.r10 <- ELC.r10
+Roads.r10 [!is.element(values(Roads.r10 ), levels(ELC.r10)[[1]]$ID[b])] <- NA
+Roads.r10 [!is.na(values(Roads.r10 ))] <- 1
+
+Roads.r30 <- ELC.r30
+Roads.r30 [!is.element(values(Roads.r30 ), levels(ELC.r30)[[1]]$ID[b])] <- NA
+Roads.r30 [!is.na(values(Roads.r30 ))] <- 1
+
+par(mfrow=c(1,2))
+plot(Roads.r10, legend=FALSE)
+plot(Roads.r30, legend=FALSE)
+```
+
+Now, we can calculate the mean radius of gyration for each of the two road maps. We will use the 8-neighbor rule.
+
+```{r}
+Roads.gyrate.r10 <- spatialize_lsm(Roads.r10, what = "lsm_p_gyrate", directions=8)
+Roads.gyrate.r30 <- spatialize_lsm(Roads.r30, what = "lsm_p_gyrate", directions=8)
+
+par(mfrow=c(1,2))
+plot(Roads.gyrate.r10[[1]]$lsm_p_gyrate)
+plot(Roads.gyrate.r30[[1]]$lsm_p_gyrate)
+```
+
+Calculate the mean radius of gyration for all roads
+
+```{r}
+c(Roads.10_c_gyrate_mn = 
+    landscapemetrics::lsm_c_gyrate_mn(Roads.r10, directions=8)$value,
+  Roads.30_c_gyrate_mn = 
+    landscapemetrics::lsm_c_gyrate_mn(Roads.r30, directions=8)$value)
+```
+
+The radius of gyration can be considered a measure of the average distance an organism can move within a patch before encountering the patch boundary from a random starting point. For our road map, this means how far one can travel on the road network, staying on road cells that are connected based on the map and the neighbour rule. 
+
+Technically, this metric is calculated as the mean distance of all cells in the patch from the patch centroid (center point). The units are in meters. 
+
+### **Question 7**
+
+- Did you find a big difference between the means for the two road maps?
+- How do you explain this?
+
+# 6. Moving (sliding) window analysis
+
+How does forest cover vary across your neighborhood? We can approach this in two ways:
+
+- Aggregate cells into a raster with larger cells, where each new cell gets a value for the proportion of smaller cells it contains that are classified as forest. 
+- Moving window analysis.
+
+## a) Aggregate forest cover to a raster with 150 m resolution
+
+```{r}
+Forest.r150 <- terra::aggregate(Forest.r10, fact=15, fun="mean")
+
+tm_shape(Forest.r150) + tm_raster(palette="Greens")
+```
+
+## b) How does moving (sliding) window analysis work?
+
+For aggregation (above), we evaluated percent forest within an area of 150 x 150 m and assigned that value to a cell in a new raster with 150 m resolution instead of 10 m resolution. This means, we changed the spatial grain from 10 m to 150 m, thus losing information. Also, this creates the impression of abrupt changes in values at the edge of these larger cells. 
+
+For a moving window analysis, we do something similar but we keep the grain constant. Using a window of 150 m by 150 m (same size as the larger-cell raster above), we calculate percent forest cover again as the mean of the values within the window. However, we keep the grain of the data at 10 m: we write the value (percent forest within the window of 150 m by 150 m) into a 10m x 10m cell at the center of the window. Let's illustrate this. 
+
+First, we need to do a bit of data manipulation to define the window around the point we used to create the buffer with 1 km radius, i.e., the centre point of the local landscape map.
+
+```{r}
+Point <- MyPoints.sf[Line,] # Use one of your points that lies within the map
+window = matrix(1, nrow = 15,ncol = 15)
+Window.1 <- Forest.r10 
+values(Window.1) <- NA
+x=colFromX(Forest.r10, st_coordinates(Point)[,1])
+y=rowFromY(Forest.r10, st_coordinates(Point)[,2])
+Window.1[c((x-7):(x+7)), c((y-7):(y+7))] <- 1
+```
+
+For illustration purposes, we will also create a polygon map from the cell that contains the point specified above, and a polygon map from the Window.1. 
+
+```{r}
+Point.r <- Forest.r10 
+values(Point.r) <- NA
+Point.r[x,y] <- 1
+Point.poly <- st_as_sf(as.polygons(Point.r))
+Window.1.poly <- st_as_sf(as.polygons(Window.1))
+```
+
+The raster `Window.1` has values of NA everywhere except for the 15 x 15 cells window centered at the point that was specified above. If we multiply the forest raster with Window.1 (`Forest.r10 * Window.1`), all values outside of the window will become NA, whereas those within the window will simply be multiplied by 1. This means that we now have forest (1/0) values only in the window.
+
+```{r}
+tm_shape(Forest.r10 * Window.1) +tm_raster(palette=c("lightgrey", "forestgreen")) +
+  tm_shape(Point.poly) + tm_borders("blue") +
+ tm_shape(Window.1.poly) + tm_borders("blue") + 
+tm_shape(Point) + tm_sf("blue", size=0.01)
+```
+
+The window may not look perfect, however, this is good enough for illustration purposes.
+
+We can now calculate the proportion of forest cover as the mean of the cell values of `Forest.r10` inside the window, using the same multiplication.
+
+```{r}
+mean(values(Forest.r10 * Window.1), na.rm=TRUE)
+```
+
+**Challenge (optional)**: Try moving the window to another one of your points (as long as it is inside your neighborhood map). What percent forest value do you get?
+
+
+Let's write the forest cover within `Window.1` into a new raster `PctForest.150`, in the 10m x 10m cell that contains the Point. We can make a copy of `Point.r` and set the value for the cell to the percent forest value.
+
+```{r}
+PctForest.150 <- Point.r
+PctForest.150[x,y] <- mean(values(Forest.r10 * Window.1), na.rm=TRUE)
+```
+
+Next, we shift the window by 1 cell. This means, we add a value of 1 to x and leave y unchanged. Then we repeat the calculations. 
+
+```{r}
+Window.2 <- Forest.r10 
+values(Window.2) <- NA
+x=x+1
+y=y
+Window.2[c((x-7):(x+7)), c((y-7):(y+7))] <- 1
+Window.2.poly <- st_as_sf(as.polygons(Window.2))
+PctForest.150[x,y] <- mean(values(Forest.r10 * Window.2), na.rm=TRUE)
+```
+
+```{r}
+tm_shape(PctForest.150) + 
+  tm_raster(palette="Greens", style="fixed", breaks=seq(0,1,0.05)) +
+tm_shape(Window.1.poly) + tm_borders("blue") +
+tm_shape(Window.2.poly) + tm_borders("red") 
+```
+
+`Window.1` is shown in blue, the shifted window, `Window.2`, is shown in red. If you zoom in, you can see two cells of `PctForest.150` colored by their percent forest value: the center cell of `Window.1` and the center cell of `Window.2`. Because the two windows overlap a lot, they will have similar values though not the same. 
+
+## c) Moving window analysis of your neighbourhood
+
+We can let R move the window for us, with the function `focal` from the `terra` package. We specify the size of the window with the argument `w=15`: this means that the window should be 15 cells in either direction. 
+
+```{r}
+MovingWindow.150 <- focal(Forest.r10, w=15, fun="mean", na.rm=TRUE, na.policy="omit") 
+tm_shape(MovingWindow.150) + tm_raster(palette="Greens", style="cont") +
+tm_shape(Window.1.poly) + tm_borders("blue") +
+tm_shape(Window.2.poly) + tm_borders("red") +
+tm_shape(Point.poly) + tm_borders("blue") +
+tm_shape(Point) + tm_sf("blue", size=0.01)
+```
+
+If you zoom in, you can see that the output raster `Res` has a slightly different raster positioning than what we did "by hand". Even if they don't fully match, the blue and red windows from our own analysis are helpful to understand what each cell value in this new raster represents.
+
+In contrast to aggregating, the map resulting from moving window analysis shows a gradual change of the property of interest (percent forest within 150 x 150 m). The value for each 10 x 10 m cell in `MovingWindow.150` tells us how much forest there is within 75 m in East-West and 75 in North-South direction from the cell. 
+
+The map above used a continuous color ramp (`style="cont"`) that shows all the details of spatial variation in percent forest cover. However, this level of detail makes the map appear blurry. We can plot the same data with the default setting for the color ramp:
+
+```{r}
+Res <- focal(Forest.r10, w=15, fun="mean", na.rm=TRUE, na.policy="omit") 
+tm_shape(Res) + tm_raster(palette="Greens")
+```
+
+This new map breaks the continuous variable "PctForest" into just five classes for visualization (thus reducing the information shown). This simplification may actually help us visually process the pattern. Note that this is solely a question of the visualization, the values stored in the raster remain the same.
+
+### **Question 8**
+
+Consider this last map. Imagine you are a forest species  that is edge-tolerant (such as the white-tailed deer on UTM campus). How would you move around your neighbourhood?
+
+# 7. Application of landscape metrics
+
+## a) Background
+
+In class, we learned about the Ecolandscapes approach to delineate landscapes according to Forman's landscape definition of a km's wide area that is characterized by a typical mosaic of ecosystems. 
+
+Your instructor applied this method to the ELC data for the Credit River watershed (the data we have been working with). The main steps were:
+
+- Rasterize the polygon data (here: at 10 m resolution).
+- Run function `eco.landscapes` of the R package `chloe` (available on GitHub) to automatically apply a large set of landscape metrics to the raster data. The results will be returned with 20 times the original resolution, here with a grain of 200 m.
+- Repeat for different combinations of window size (moving/sliding window analysis) and number of ecolandscapes (classification of pixels by their values across all landscape metrics for a given window size). 
+- See lecture slides: visually select the most suitable map (combination of number of clusters and window size). 
+- Interpret the map ecologically.
+
+This last step is where you come in!
+
+## b) Explore map of ecolandscapes
+
+Load the selected map. The code assumes that the shapefile "Ecolandscapes_CVC.shp", with its additional components, resides in a folder "Ecolandscapes_CVC" in the "data" folder in your project folder.
+
+```{r}
+infile <- here::here("data/Ecolandscapes_CVC/Ecolandscapes_CVC.shp")
+Ecolandscapes_CVC <- st_read(infile)
+```
+
+Create an interactive overlay of the map with a satellite map.
+
+```{r}
+tmap_mode("view")
+tmap_options(basemaps=c(Imagery = "Esri.WorldImagery", Canvas = "Esri.WorldGrayCanvas"))
+myPalette <- c(palette=brewer.pal(n = 10, name = "Paired")) # Define colors
+
+tm_shape(Ecolandscapes_CVC) + 
+  tm_sf("Group", style="cat", alpha=0.5, style="cat", 
+        palette=myPalette, legend.show=TRUE)
+```
+
+Explore the map. 
+
+- You can zoom in until you can see the details of the underlying land cover. 
+- Can you find UTM campus, in the lower watershed?
+- Can you see differences between the different ecolandscapes that were delinated? How would differentiate them?
+- Note that the same color indicates the same group (landscape type), i.e., each landscape type can occur in multiple places in the study area. 
+
+
+Keep the following in mind:
+
+- The map shows four groups (ecolandscapes) for the upper watershed, and another six groups for the lower watershed. 
+- As these were delineated separately, it is possible that the same type of landscape occurred in both parts of the watershed and should be reclassified as being the same group.
+- Also, there may be some small areas, e.g. along the boundary or where the two parts of the watershed meet, that were classified as something else, we can ignore these (likely artefacts of the method, e.g., because of the missing data outside).
+
+**Question 9**: 
+
+- What do groups 2 and 8 represent? 
+- Should they be considered separate landscape types or not?
+
+## c) Interpret and annotate map
+
+Let's create a copy of the map, add some attributes (`Keep`, `Label`, `ColorID`, `colhex`) and extract an attribute table as a data frame in R. 
+
+```{r}
+Ecolandscapes_CVC_2 <-  Ecolandscapes_CVC %>%
+  dplyr::mutate(Keep="Y", Label="NA", ColorID=1:max(Group)) %>%
+  mutate(colhex = myPalette[ColorID], Keep=factor(Keep, levels=c("Y", "N"))) %>%
+  dplyr::select(Group, Keep, Label, ColorID, colhex)
+Attributes <- st_drop_geometry(Ecolandscapes_CVC_2)
+```
+
+The code below will open the attribute table in an editor, where you can interactively edit it: 
+
+- Enter a meaningful `Label` for each group (no need to add quotes for text).
+- If a group should be removed, change `Keep = Y` to `Keep = N`.
+- Optional: edit `ColorID` to assign each group a color from the Group legend above (i.e., reassign the color numbers shown in the legend to the Labels you want them to represent).
+- Leave columns `Group` and `colhex` unchanged.
+- Click "Quit".
+
+Note: if the editor does not open, you may open the file from the File Explorer and edit it e.g. in Excel. Make sure not to change the file type, though (or you would need to change the code to import it).
+
+```{r message=FALSE}
+myAttributes <- Attributes
+
+if(file.exists(here::here("myAttributes.csv"))) 
+{ myAttributes = read.csv(here::here("myAttributes.csv"))} 
+try(myAttributes <- edit(myAttributes))
+write.csv(myAttributes, here::here("myAttributes.csv"))
+myAttributes = read.csv(here::here("myAttributes.csv")) %>% 
+  dplyr::select(Group, Keep, Label, ColorID, colhex)
+
+myAttributes 
+```
+
+Check your edits in the table above. If you want to continue editing, repeat the previous step before continuing.
+
+```{r}
+Ecolandscapes_CVC_2$Keep <- myAttributes$Keep
+Ecolandscapes_CVC_2$Label <- myAttributes$Label
+Ecolandscapes_CVC_2$ColorID <- myAttributes$ColorID
+Ecolandscapes_CVC_2$colhex <- myAttributes$myPalette[myAttributes$ColorID]
+```
+
+## d) Plot and export static map
+
+Preparations for plotting
+
+```{r}
+Order <- data.frame(Label=unique(Ecolandscapes_CVC_2$Label))
+if(length(Order) == 1) 
+{
+    Order <- Attributes %>% mutate(Label=paste0("Group ", Group))
+    tmp <- Ecolandscapes_CVC_2 %>% dplyr::filter(Keep=="Y") 
+    tmp$Label <- factor(Order$Label, levels = paste0("Group ", tmp$Group))
+}else{
+    Order <- dplyr::left_join(Order, 
+              myAttributes %>% select(Label,ColorID) %>% distinct(), by="Label")
+    tmp <- Ecolandscapes_CVC_2 %>% dplyr::filter(Keep=="Y") 
+    tmp$Label <- factor(tmp$Label,levels=Order$Label)
+}
+```
+
+This time, we will plot a static map, without a basemap.
+
+```{r}
+tmap_mode("plot")
+```
+
+```{r message=FALSE, warning=FALSE}
+
+Ecolandscapes_map <- tm_shape(tmp) + 
+  tm_fill(col="Label", alpha=0.8, palette=myPalette[Order$ColorID]) +
+  tm_layout(main.title = "Ecolandscapes CVC",
+          legend.position = c("right", "top"))
+Ecolandscapes_map
+```
+
+Save map to file, export shapefile with labels.
+
+```{r warning=FALSE}
+tmap_save(Ecolandscapes_map, here::here("Ecolandscapes_map.png"))
+outfile= here::here("data/Ecolandscapes_CVC/Ecolandscapes_CVC_2.shp")
+st_write(Ecolandscapes_CVC_2, outfile, append=FALSE)
+```
