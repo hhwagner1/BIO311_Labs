@@ -1,0 +1,258 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+# required packages
+#install.packages("devtools")
+#install.packages("Rtools") # Windows only?
+# clean up before reloading a new version
+#detach("package:chloe")
+#.rs.restartR()
+
+#remotes::install_github("pauI/chloeR") # install package
+#library("chloe") # load package
+get.java() # a Java Virtual Machine is needed, to retrieve the default path
+
+#set.java("path/to/java/java.exe") # to declare a specific JVM
+```
+
+```{r}
+library(chloe)
+library(dplyr)
+library(here)
+library(terra)
+library(tmap)
+library(RColorBrewer)
+library(sf)
+```
+
+
+# 1. Run example
+
+## a) Run `eco.landscape`
+
+Note: the `.tif` files in the output folder won't be overwritten. Need to either delete them first or create a new output subfolder.
+
+```{r}
+infile <- system.file("data", "sample.tif", package = "chloe")
+output_folder <- here::here("output/output.test5")
+
+eco.landscape(
+input_raster=infile,
+scales=c(1000),
+classes=c(5, 6, 7),
+output_folder=output_folder,
+properties_file=file.path(output_folder, "params.properties"))
+```
+
+## b) Map results
+
+```{r}
+mapfiles <- list.files(output_folder, pattern=".tif")
+mapfiles <- mapfiles[-grep(pattern = "rupture", mapfiles)] 
+Ecolandscapes <- list()
+for(i in 1:length(mapfiles))
+{
+  Ecolandscapes[[i]] <- terra::rast(file.path(output_folder, mapfiles[i]))
+}
+names(Ecolandscapes) <- substr(mapfiles, start=13, stop=33)
+Ecolandscapes <- as.factor(terra::rast(Ecolandscapes)) # Stack the maps
+```
+
+```{r}
+tmap_mode("plot")
+tm_shape(Ecolandscapes) + tm_raster(legend.show=FALSE)
+```
+
+# 2. Apply to CVC ELC map
+
+## a) Rasterize ELC map
+
+```{r}
+ELC.sf <- sf::st_read("data/ELC_and_Land_Use_2022_-4248462527224701921/Ecological_Land_Classification_ELC_and_Land_Use_2022.shp") 
+ELC.sf <- st_make_valid(ELC.sf )
+```
+
+```{r}
+template.30<- rast(extent=ext(vect(ELC.sf)), resolution=30, crs=crs(vect(ELC.sf)))
+CVC.r30 <- terra::rasterize(ELC.sf, template.30, "TYPE")
+template.10<- rast(extent=ext(vect(ELC.sf)), resolution=10, crs=crs(vect(ELC.sf)))
+CVC.r10 <- terra::rasterize(ELC.sf, template.10, "TYPE")
+writeRaster(CVC.r30 , here::here("output/CVC.r30.tif"), overwrite=TRUE)
+writeRaster(CVC.r10 , here::here("output/CVC.r10.tif"), overwrite=TRUE)
+```
+
+
+
+
+## b) Run `eco.landscape`
+
+```{r}
+infile <- here::here("output/CVC.r10.tif")
+output_folder <- here::here("output/CVC.r10")
+
+eco.landscape(
+input_raster=infile,
+scales=c(1000),
+classes=c(3, 5, 7, 10),
+output_folder=output_folder,
+properties_file=file.path(output_folder, "params.properties"))
+```
+
+
+## c) Map results
+
+```{r}
+mapfiles <- list.files(output_folder, pattern=".tif")
+mapfiles <- mapfiles[-grep(pattern = "rupture", mapfiles)] 
+outfiles <- gsub("ecopaysages_CVC", "CVC", mapfiles)
+Ecolandscapes <- list()
+for(i in 1:length(mapfiles))
+{
+  tmp <- terra::rast(file.path(output_folder, mapfiles[i]))
+  terra::crs(tmp) <- terra::crs(CVC.r10)
+  writeRaster(tmp, file.path(output_folder, outfiles[i]), overwrite=TRUE)
+  Ecolandscapes[[i]] <- terra::rast(file.path(output_folder, outfiles[i]))
+}
+names(Ecolandscapes) <- substr(mapfiles, start=13, stop=33)
+Ecolandscapes <- as.factor(terra::rast(Ecolandscapes)) # Stack the maps
+```
+
+```{r}
+CVC_Boundary <- st_read(here::here("data/CVC_boundaryt/CVC_boundaryt.shp"))
+Ecolandscapes.m <- mask(Ecolandscapes, vect(CVC_Boundary))
+```
+
+
+```{r}
+tmap_mode("plot")
+myPalette <- c(palette=brewer.pal(n = 10, name = "Paired"))
+#myPalette <- paste0(myPalette, "80")
+#myPalette <- c("#00000000", myPalette)
+tm_shape(Ecolandscapes.m) + tm_raster(style="cat", palette=myPalette)
+```
+
+
+# 3. Apply to lower watershed ELC map
+
+## a) Rasterize ELC map
+
+```{r}
+ELC.sf <- sf::st_read("data/ELC_and_Land_Use_2022_-4248462527224701921/Ecological_Land_Classification_ELC_and_Land_Use_2022.shp") 
+ELC.sf <- st_make_valid(ELC.sf )
+Lower_WaterShed <- st_read(here::here("data/Lower_WaterShed/Lower_WaterShed.shp"))
+```
+
+```{r}
+template.10 <- rast(extent=ext(vect(st_crop(ELC.sf, Lower_WaterShed))), 
+                    resolution=10, crs=crs(vect(ELC.sf)))
+LWS.r10 <- terra::rasterize(ELC.sf, template.10, "TYPE")
+writeRaster(LWS.r10 , here::here("output/LWS.r10.tif"), overwrite=TRUE)
+```
+
+
+
+
+## b) Run `eco.landscape`
+
+```{r}
+infile <- here::here("output/LWS.r10.tif")
+output_folder <- here::here("output/LWS.r10")
+
+Scales = c(500, 1000, 1500, 2000, 2500, 3000)
+for(s in 1:length(Scales))
+eco.landscape(
+input_raster=infile,
+scales=Scales[s],
+classes=c(3:10),
+output_folder=output_folder,
+properties_file=file.path(output_folder, "params.properties"))
+```
+
+Notes:
+
+- I had to run 'eco.landscape' separately for each scale because it produced only one tif file per #classes.
+- The output .tif files had correct coordinates but incorrect crs information! A French crs was assigned. I had to import the files, change their crs information, and save them under a different name.
+
+## c) Map results
+
+```{r}
+#Lower_WaterShed <- st_read(here::here("data/Lower_WaterShed/Lower_WaterShed.shp"))
+#output_folder <- here::here("output/LWS.r10")
+
+#file.remove(file.path(output_folder, outfiles))
+mapfiles <- list.files(output_folder, pattern=".tif")
+mapfiles <- mapfiles[-grep(pattern = "rupture", mapfiles)] 
+outfiles <- gsub("ecopaysages_", "", mapfiles)
+Ecolandscapes <- list()
+for(i in 1:length(mapfiles))
+{
+  tmp <- terra::rast(file.path(output_folder, mapfiles[i]))
+  terra::crs(tmp) <- terra::crs(vect(Lower_WaterShed))
+  writeRaster(tmp, file.path(output_folder, outfiles[i]), overwrite=TRUE)
+  Ecolandscapes[[i]] <- terra::rast(file.path(output_folder, outfiles[i]))
+}
+
+Ecolandscapes <- as.factor(terra::rast(Ecolandscapes)) # Stack the maps
+```
+
+```{r}
+Ecolandscapes.m <- mask(Ecolandscapes, vect(Lower_WaterShed))
+#s = order(sapply(Ecolandscapes.m, function(r) nrow(levels(r)[[1]])))
+#Ecolandscapes.m <- Ecolandscapes.m[[s]]
+
+tmp <- t(simplify2array(strsplit(names(Ecolandscapes.m), split="_")))
+
+dd <- data.frame(nClasses = as.numeric(gsub("\\D", "", tmp[,3])),
+                 Scale = as.numeric(gsub("\\D", "", tmp[,4])))
+dd$Label <- paste0(dd$Scale, " m, ", dd$nClasses, " groups")
+
+s = with(dd, order(nClasses, Scale))
+Ecolandscapes.m <- Ecolandscapes.m[[s]]
+```
+
+
+```{r}
+tmap_mode("plot")
+myPalette <- c(palette=brewer.pal(n = 10, name = "Paired"))
+#myPalette <- paste0(myPalette, "80")
+#myPalette <- c("#00000000", myPalette)
+tm_shape(Ecolandscapes.m) + 
+  tm_raster(style="cat", palette=myPalette, legend.show=FALSE) +
+  tm_facets(nrow=length(unique(dd$nClasses)), ncol=length(unique(dd$Scale))) +
+  tm_layout(panel.labels = c(dd$Label[s]))
+```
+
+```{r}
+m1 <- grep("1000m", names(Ecolandscapes.m))
+m2 <- grep("6classes", names(Ecolandscapes.m))
+tm_shape(Ecolandscapes.m[[intersect(m1, m2)]]) + 
+  tm_raster(style="cat", palette=myPalette) +
+  tm_layout(legend.outside=TRUE, title="Group") 
+```
+
+## d) Create interactive map
+
+Create multipolygons from raster map
+
+```{r}
+m1 <- grep("1000m", names(Ecolandscapes.m))
+m2 <- grep("6classes", names(Ecolandscapes.m))
+
+Groups.1000m.6 <- st_as_sf(as.polygons(Ecolandscapes.m[[intersect(m1, m2)]]))
+```
+
+```{r}
+tmap_mode("view")
+tmap_options(basemaps=c(Imagery = "Esri.WorldImagery", Canvas = "Esri.WorldGrayCanvas"))
+tm_shape(Groups.1000m.6) + 
+  tm_sf("ecopaysages_LWS.r10_6classes_1000m", style="cat", alpha=0.5,
+        legend.show=FALSE)
+```
+
+

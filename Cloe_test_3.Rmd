@@ -1,0 +1,361 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+# required packages
+#install.packages("devtools")
+#install.packages("Rtools") # Windows only?
+# clean up before reloading a new version
+#detach("package:chloe")
+#.rs.restartR()
+
+#remotes::install_github("pauI/chloeR") # install package
+#library("chloe") # load package
+#get.java() # a Java Virtual Machine is needed, to retrieve the default path
+
+#set.java("path/to/java/java.exe") # to declare a specific JVM
+```
+
+```{r message=FALSE}
+library(chloe)
+library(dplyr)
+library(here)
+library(terra)
+library(tmap)
+library(RColorBrewer)
+library(sf)
+```
+
+Notes: feedback for package developers
+
+- I had to run 'eco.landscape' separately for each scale because it produced only one tif file per #classes.
+- The output .tif files had correct coordinates but incorrect crs information! A French crs was assigned. I had to import the files, change their crs information, and save them under a different name.
+- Cells with NA in the input map are included in the clustering, this should probably be changed. I worked around this by masking the output maps. However, this creates some artefacts where some internal areas are classified with the NA's (unless these were NA?).
+
+
+
+# 1. Apply `eco.landscape` to lower watershed ELC map
+
+## a) Rasterize ELC map
+
+```{r}
+ELC.sf <- sf::st_read("data/ELC_and_Land_Use_2022_-4248462527224701921/Ecological_Land_Classification_ELC_and_Land_Use_2022.shp") 
+ELC.sf <- st_make_valid(ELC.sf )
+Lower_WaterShed <- st_read(here::here("data/Lower_WaterShed/Lower_WaterShed.shp"))
+```
+
+```{r}
+template.10 <- rast(extent=ext(vect(st_crop(ELC.sf, Lower_WaterShed))), 
+                    resolution=10, crs=crs(vect(ELC.sf)))
+LWS.r10 <- terra::rasterize(ELC.sf, template.10, "TYPE")
+writeRaster(LWS.r10 , here::here("output/LWS.r10.tif"), overwrite=TRUE)
+```
+
+
+## b) Run `eco.landscape`
+
+```{r eval=FALSE}
+infile <- here::here("output/LWS.r10.tif")
+output_folder <- here::here("output/LWS.r10")
+
+Scales = c(500, 1000, 1500, 2000, 2500, 3000)
+for(s in 1:length(Scales))
+eco.landscape(
+input_raster=infile,
+scales=Scales[s],
+classes=c(3:10),
+output_folder=output_folder,
+properties_file=file.path(output_folder, "params.properties"))
+```
+
+Notes:
+
+- I had to run 'eco.landscape' separately for each scale because it produced only one tif file per #classes.
+- The output .tif files had correct coordinates but incorrect crs information! A French crs was assigned. I had to import the files, change their crs information, and save them under a different name.
+
+## c) Map results
+
+Note: this is where I had to import the .tif files, change the CRS information, export, and re-import.
+
+```{r}
+Lower_WaterShed <- st_read(here::here("data/Lower_WaterShed/Lower_WaterShed.shp"))
+output_folder <- here::here("output/LWS.r10")
+
+mapfiles <- list.files(output_folder, pattern=".tif")
+mapfiles <- mapfiles[-grep(pattern = "rupture", mapfiles)] 
+outfiles <- gsub("ecopaysages_", "", mapfiles)
+Ecolandscapes <- list()
+for(i in 1:length(mapfiles))
+{
+  tmp <- terra::rast(file.path(output_folder, mapfiles[i]))
+  terra::crs(tmp) <- terra::crs(vect(Lower_WaterShed))
+  writeRaster(tmp, file.path(output_folder, outfiles[i]), overwrite=TRUE)
+  Ecolandscapes[[i]] <- terra::rast(file.path(output_folder, outfiles[i]))
+}
+
+Ecolandscapes.LWS <- as.factor(terra::rast(Ecolandscapes)) # Stack the maps
+```
+
+```{r}
+Ecolandscapes.LWS <- mask(Ecolandscapes.LWS, vect(Lower_WaterShed)), touches=FALSE)
+#s = order(sapply(Ecolandscapes.m, function(r) nrow(levels(r)[[1]])))
+#Ecolandscapes.m <- Ecolandscapes.m[[s]]
+
+tmp <- t(simplify2array(strsplit(names(Ecolandscapes.LWS), split="_")))
+
+dd <- data.frame(nClasses = as.numeric(gsub("\\D", "", tmp[,3])),
+                 Scale = as.numeric(gsub("\\D", "", tmp[,4])))
+dd$Label <- paste0(dd$Scale, " m, ", dd$nClasses, " groups")
+
+s = with(dd, order(nClasses, Scale))
+Ecolandscapes.LWS <- Ecolandscapes.LWS[[s]]
+```
+
+```{r}
+tmap_mode("plot")
+```
+
+```{r fig.height=8, fig.width=7, message=FALSE, warning=FALSE}
+myPalette <- c(palette=brewer.pal(n = 10, name = "Paired"))
+#myPalette <- paste0(myPalette, "80")
+#myPalette <- c("#00000000", myPalette)
+tm_shape(Ecolandscapes.LWS) + 
+  tm_raster(style="cat", palette=myPalette, legend.show=FALSE) +
+  tm_facets(nrow=length(unique(dd$nClasses)), ncol=length(unique(dd$Scale))) +
+  tm_layout(panel.labels = c(dd$Label[s]))
+```
+
+## d) Create interactive map
+
+Create multipolygons from raster map
+
+```{r}
+m1 <- grep("1000m", names(Ecolandscapes.LWS))
+m2 <- grep("6classes", names(Ecolandscapes.LWS))
+
+LWS.Groups.1000m.6 <- st_as_sf(as.polygons(Ecolandscapes.LWS[[intersect(m1, m2)]]))
+st_write(LWS.Groups.1000m.6, here::here("output/LWS.Groups.1000m.6.shp"), append=FALSE)
+```
+
+```{r}
+tmap_mode("view")
+```
+
+```{r fig.height=5, fig.width=7}
+tmap_options(basemaps=c(Imagery = "Esri.WorldImagery", Canvas = "Esri.WorldGrayCanvas"))
+tm_shape(LWS.Groups.1000m.6) + 
+  tm_sf("ecopaysages_LWS.r10_6classes_1000m", style="cat", alpha=0.5,
+        legend.show=FALSE)
+```
+
+# 2. Repeat for upper watershed
+
+## a) Rasterize ELC map
+
+```{r}
+ELC.sf <- sf::st_read("data/ELC_and_Land_Use_2022_-4248462527224701921/Ecological_Land_Classification_ELC_and_Land_Use_2022.shp") 
+ELC.sf <- st_make_valid(ELC.sf )
+Lower_WaterShed <- st_read(here::here("data/Lower_WaterShed/Lower_WaterShed.shp"))
+CVC_Boundary <- st_read(here::here("data/CVC_boundaryt/CVC_boundaryt.shp"))
+CVC_Boundary <- st_transform(CVC_Boundary, st_crs(Lower_WaterShed))
+Upper_WaterShed <- st_difference(CVC_Boundary, st_buffer(Lower_WaterShed, 5))
+```
+
+```{r}
+template.UWS.10 <- rast(extent=ext(vect(st_crop(ELC.sf, Upper_WaterShed))), 
+                    resolution=10, crs=crs(vect(ELC.sf)))
+UWS.r10 <- terra::rasterize(ELC.sf, template.UWS.10, "TYPE")
+writeRaster(UWS.r10 , here::here("output/UWS.r10.tif"), overwrite=TRUE)
+```
+
+
+## b) Run `eco.landscape`
+
+```{r eval=FALSE}
+infile <- here::here("output/UWS.r10.tif")
+output_folder <- here::here("output/UWS.r10")
+
+Scales = c(500, 1000, 1500, 2000, 2500, 3000)
+for(s in 1:length(Scales))
+eco.landscape(
+input_raster=infile,
+scales=Scales[s],
+classes=c(3:10),
+output_folder=output_folder,
+properties_file=file.path(output_folder, "params.properties"))
+```
+
+
+## c) Map results
+
+```{r}
+output_folder <- here::here("output/UWS.r10")
+
+#file.remove(file.path(output_folder, outfiles))
+mapfiles <- list.files(output_folder, pattern=".tif")
+mapfiles <- mapfiles[-grep(pattern = "rupture", mapfiles)] 
+outfiles <- gsub("ecopaysages_", "", mapfiles)
+Ecolandscapes <- list()
+for(i in 1:length(mapfiles))
+{
+  tmp <- terra::rast(file.path(output_folder, mapfiles[i]))
+  terra::crs(tmp) <- terra::crs(vect(Upper_WaterShed))
+  writeRaster(tmp, file.path(output_folder, outfiles[i]), overwrite=TRUE)
+  Ecolandscapes[[i]] <- terra::rast(file.path(output_folder, outfiles[i]))
+}
+
+Ecolandscapes.UWS <- as.factor(terra::rast(Ecolandscapes)) # Stack the maps
+```
+
+```{r}
+Ecolandscapes.UWS <- mask(Ecolandscapes.UWS, vect(Upper_WaterShed), touches=FALSE)
+#s = order(sapply(Ecolandscapes.m, function(r) nrow(levels(r)[[1]])))
+#Ecolandscapes.m <- Ecolandscapes.m[[s]]
+
+tmp <- t(simplify2array(strsplit(names(Ecolandscapes.UWS), split="_")))
+
+dd <- data.frame(nClasses = as.numeric(gsub("\\D", "", tmp[,3])),
+                 Scale = as.numeric(gsub("\\D", "", tmp[,4])))
+dd$Label <- paste0(dd$Scale, " m, ", dd$nClasses, " groups")
+
+s = with(dd, order(nClasses, Scale))
+Ecolandscapes.UWS <- Ecolandscapes.UWS[[s]]
+```
+
+
+```{r}
+tmap_mode("plot")
+```
+
+```{r fig.height=8, fig.width=7, message=FALSE, warning=FALSE}
+myPalette <- c(palette=brewer.pal(n = 10, name = "Paired"))
+#myPalette <- paste0(myPalette, "80")
+#myPalette <- c("#00000000", myPalette)
+tm_shape(Ecolandscapes.UWS) + 
+  tm_raster(style="cat", palette=myPalette, legend.show=FALSE) +
+  tm_facets(nrow=length(unique(dd$nClasses)), ncol=length(unique(dd$Scale))) +
+  tm_layout(panel.labels = c(dd$Label[s]))
+```
+
+Create multipolygons from raster map
+
+```{r}
+m1 <- grep("1500m", names(Ecolandscapes.UWS))
+m2 <- grep("4classes", names(Ecolandscapes.UWS))
+
+UWS.Groups.1500m.4 <- st_as_sf(as.polygons(Ecolandscapes.UWS[[intersect(m1, m2)]]))
+st_write(UWS.Groups.1500m.4, here::here("output/UWS.Groups.1500m.4.shp"), append=FALSE)
+```
+
+# 3. Interpret delineated ecolandscapes
+
+## a) Explore groups interactively
+
+Import polygon maps of groups and renumber to avoid duplicate group numbers.
+
+```{r}
+tmap_mode("view")
+
+UWS.Groups.1500m.4 <- st_read(here::here("output/UWS.Groups.1500m.4.shp")) 
+UWS.Groups.1500m.4 <- UWS.Groups.1500m.4 %>% 
+  rename(Group = names(UWS.Groups.1500m.4)[1]) %>%
+  mutate(Group = as.numeric(Group))
+
+LWS.Groups.1000m.6 <- st_read(here::here("output/LWS.Groups.1000m.6.shp"))
+LWS.Groups.1000m.6 <- LWS.Groups.1000m.6 %>% 
+  rename(Group = names(LWS.Groups.1000m.6)[1]) %>%
+  mutate(Group = as.numeric(Group) + nrow(UWS.Groups.1500m.4))
+```
+
+Plot both maps (upper and lower watershed) together over satellite imagery to interactively interpret groups.
+
+```{r fig.height=5, fig.width=7}
+myPalette <- c(palette=brewer.pal(n = 10, name = "Paired"))
+tmap_options(basemaps=c(Imagery = "Esri.WorldImagery", Canvas = "Esri.WorldGrayCanvas"))
+tm_shape(UWS.Groups.1500m.4) + 
+  tm_sf("Group", style="cat", alpha=0.5,
+        legend.show=FALSE, palette=myPalette[1:4]) +
+tm_shape(LWS.Groups.1000m.6) + 
+  tm_sf("Group", style="cat", alpha=0.5,
+        legend.show=FALSE, palette=myPalette[-c(1:4)])
+```
+
+## b) Select and label groups
+
+Add attributes (variables): `Color`, `Keep`, `Label`
+
+```{r}
+Ecolandscapes_CVC <-  rbind(st_buffer(UWS.Groups.1500m.4, -10), 
+                            st_buffer(LWS.Groups.1000m.6, -10)) %>%
+  dplyr::mutate(Keep="N", Label=NA, Color=1:max(Group)) %>%
+  dplyr::select(Color, Group, Keep, Label)
+Ecolandscapes_CVC_2 <- Ecolandscapes_CVC
+```
+
+```{r}
+tmap_mode("plot")
+```
+
+```{r message=FALSE, warning=FALSE}
+tm_shape(Ecolandscapes_CVC) + 
+  tm_sf("Group", style="cat", alpha=0.5, palette=myPalette) +
+  tm_layout(legend.outside=TRUE)
+```
+
+```{r}
+st_drop_geometry(Ecolandscapes_CVC_2)
+```
+
+For each group g:
+
+- Decide whether it should be kept. If so, change the g^th value of `Keep` from "N" to "Y". 
+- Change the g^th value of `Label` from "NA" to a meaningful label. 
+- If two groups should be merged, assign them the same `Label` and `Color`.
+- Optional: shuffle the Color numbers to reassign the ten colors to groups. 
+
+
+```{r}
+Keep <- c("N", "N", "N", "N", "N", "N", "N", "N", "N", "N")
+Label <- c("NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA")
+Color <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+```
+
+```{r}
+Keep <- c("Y", "Y", "Y", "Y", "Y", "Y", "Y", "Y", "Y", "Y")
+Label <- c("Digs", "Rural", "More natural", "Rural settlement", 
+            "Lakeshore", "Residential", "Commercial/Industrial", 
+           "Rural", "Lakeshore", "River corridor")
+Color <- c(1, 3, 4, 8, NA, 6, 10, 3, 9, 2)
+#Color <- c(1, 7, 4, 6, NA, 8, 10, 7, 2, 3)
+Color <- c(7, 3, 4, 8, NA, 5, 6, 3, 1, 2)
+Color <- c(7, 3, 4, 8, 2, 5, 6, 3, 2, 10)
+```
+
+Check your edits:
+
+```{r}
+Ecolandscapes_CVC_2$Keep <- Keep
+Ecolandscapes_CVC_2$Label <- Label
+Ecolandscapes_CVC_2$Color <- Color
+Ecolandscapes_CVC_2$colhex <- myPalette[Color]
+st_drop_geometry(Ecolandscapes_CVC_2)
+```
+
+If you are satisfied with your edits, replot the map.
+
+```{r}
+Order <- c(3,2,4,1,7,6,10,9)
+tmp <- Ecolandscapes_CVC_2 %>% dplyr::filter(Keep=="Y") %>%
+           mutate(Label=factor(Label,levels=Label[Order]))
+
+tm_shape(tmp) + 
+  tm_fill(col="Label", alpha=0.8, palette=tmp$colhex[Order]) +
+  tm_layout(main.title = "Ecolandscapes CVC",
+          legend.position = c("right", "top"))
+```
+

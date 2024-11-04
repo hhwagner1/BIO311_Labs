@@ -1,0 +1,92 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+# required packages
+#install.packages("devtools")
+#install.packages("Rtools") # Windows only?
+# clean up before reloading a new version
+#detach("package:chloe")
+#.rs.restartR()
+devtools::install_github("pauI/chloeR") # install package
+library("chloe") # load package
+get.java() # a Java Virtual Machine is needed, to retrieve the default path
+#set.java("path/to/java/java.exe") # to declare a specific JVM
+```
+
+```{r}
+library(chloe)
+library(dplyr)
+library(here)
+library(terra)
+library(tmap)
+```
+
+
+
+```{r}
+infile <- system.file("data", "sample.tif", package = "chloe")
+output_folder <- here::here("output")
+
+grid.window(
+input_raster=infile,
+metrics=c("SHDI","HET"),
+sizes=c(50,100),
+output_folder=output_folder,
+properties_file = file.path(output_folder, "params.properties"))
+```
+
+
+
+```{r}
+sliding.window(
+input_raster=infile,
+metrics=c("pNV_1"),
+sizes=51,
+distance_type="FAST_GAUSSIAN",
+output_raster=file.path(output_folder, "prop_wood.tif"),
+properties_file = file.path(output_folder, "params.properties"))
+```
+
+
+```{r}
+eco.landscape(
+input_raster=infile,
+scales=c(1000),
+classes=c(5,6,7),
+output_folder=output_folder,
+properties_file=file.path(output_folder, "params.properties"))
+```
+
+Sample dataset
+
+```{r}
+infile <- system.file("data", "sample.tif", package = "chloe")
+Landscape <- terra::rast(infile)
+```
+
+```{r}
+tmap_mode("view")
+tm_shape(Landscape) + tm_raster()
+```
+
+```{r}
+sliding.window(
+input_raster=infile,
+metrics=c("pNV_1"),
+sizes=51,
+distance_type="FAST_GAUSSIAN",
+output_raster=here::here("output/prop_wood.tif"),
+properties_file = NULL)
+```
+
+
+
