@@ -1,0 +1,168 @@
+---
+title: "Remote Sensing Lab"
+output: html_notebook
+---
+
+# 1. Introduction
+
+## a) Goals:
+
+- Understand how satellite imagery is converted into discrete or continuous raster data
+- Link satellite imagery and derived maps to known landscape (around home)
+- Summarize local landscape
+
+## b) Steps:
+
+- Extract satellite imagery around a point of interest
+  - Landsat 8 (30 m)
+  - Sentinel 2 (10 m): 
+    - Bands and combinations: https://gisgeography.com/sentinel-2-bands-combinations/. 
+    - Analysis with R: https://bookdown.org/igisc/EnvDataSci/imagery.html
+- Display bands as true color and false color images
+- Raster calculation:
+  - NDVI
+- Unsupervised classification (optional)
+- Supervised classification
+  - Define legend: what will be mapped?
+  - Create training set
+  - Apply to entire local landscape
+- Summarize landscape:
+  - Continuous: mean
+  - Discrete: percent of area
+- Compare results among students
+  - Rank local landscapes? (Positionality)
+  - Correlation between NDVI and Urbanization?
+
+## c) Sources: we will losely follow these tutorials:
+
+- https://urbanspatial.github.io/classifying_satellite_imagery_in_R/
+- https://docs.digitalearthafrica.org/en/latest/sandbox/notebooks/Real_world_examples/Urban_index_comparison.html
+
+## d) Data: Landsat 8 data from EarthExplorer (USGS)
+
+- Note: may become unavailable after Aug 30, 2024?
+- Needs a (free) account
+- Instructions: https://gisgeography.com/usgs-earth-explorer-download-free-landsat-imagery/
+
+## e) R packages
+
+```{r}
+library(terra)
+library(here)
+library(tidyverse)
+library(dplyr)
+library(sf)
+library(tmap)
+library(stars)
+```
+
+# 2. Explore Landsat Imagery
+
+## a) Import Landsat 8 scene
+
+```{r}
+datapath <- "data/Landsat8_14Aug2024"
+filelist <- list.files(datapath, full.names = TRUE, pattern = "T1_B")
+filelist <- filelist[which(is.na(str_extract(filelist, regex("B8.TIF"))))]
+Image_bands <- rast(filelist)
+names(Image_bands) <- as.character(sapply(names(Image_bands), function(x) substring(x, 42)))
+Image_bands
+```
+## b) Description of bands
+
+```{r}
+Bands <- data.frame(Band=paste0("B", 1:11), 
+                    Description=c("Coastal/aerosol", 'Blue', 'Green',
+                       'Red', 'Near Infrared (NIR)','Shortwave Infrared (SWIR) 1',
+                       'Shortwave Infrared (SWIR) 2', 'Panchromatic', 'Cirrus',
+                       'Thermal Infrared (TIRS) 1', 'Thermal Infrared (TIRS) 2' ))
+Bands <- left_join(data.frame(Band=names(Image_bands)), Bands)
+Bands
+```
+Normalize values (range: 0 - 1)
+
+```{r}
+nx <- minmax(Image_bands, compute=TRUE)    
+Image_rgb <- (Image_bands - nx[1,]) / (nx[2,] - nx[1,])
+```
+
+## c) Extract local landscape
+
+Create spatial feature with point coordinates from Google Maps, Change transformation to match the coordinate system (crs) of the image.
+
+```{r}
+Point <-  data.frame(Latitude=43.66985782515024, Longitude=-79.38951424756152)
+Point.sf <- st_as_sf(Point, coords=c("Longitude", "Latitude"), crs=st_crs(4326))
+Point.sf <- st_transform(Point.sf, crs=st_crs(Image_bands))
+```
+
+Create a buffer around point, with a radius of 1000 m 
+
+```{r}
+Radius = 1000
+Buffer <- st_buffer(Point.sf, Radius)
+```
+
+Limit data to buffer area (crop and mask)
+
+```{r}
+Landscape <- crop(Image_rgb, Buffer)
+Landscape <-  mask(Landscape, Buffer)
+```
+
+```{r}
+plotRGB(Landscape, r="B4", g="B3", b="B2", stretch="lin", smooth=FALSE)
+```
+
+
+# 3. Raster Calculations
+
+## a) NDVI
+
+```{r}
+Landscape.NDVI <- (Landscape[["B5"]] - Landscape[["B4"]])/(Landscape[["B5"]] + Landscape[["B4"]]) 
+plot(Landscape.NDVI)
+```
+```{r}
+NDVI <- (Image_bands[["B5"]] - Image_bands[["B4"]])/(Image_bands[["B5"]] + Image_bands[["B4"]]) 
+range(values(NDVI), na.rm = T)
+```
+
+```{r}
+plot(NDVI)
+```
+
+
+
+
+```{r}
+tm_shape(NDVI) + tm_raster(palette = "Greens")
+```
+
+```{r}
+Landscape.NDVI <- mask(crop(NDVI, Buffer), Buffer)
+
+tm_basemap(c(Imagery = "Esri.WorldImagery")) + 
+tm_shape(Landscape.NDVI, raster.downsample=FALSE) + tm_raster(palette = "Greens", alpha=0.4)
+```
+
+
+
+
+
+
+# 4. Supervised Classification
+
+See also this resource: https://gisgeography.com/image-classification-techniques-remote-sensing/
+Similar techniques are used in biological/medical imaging.
+
+# 5. Compare Results among students
+
+## a) Rank local landscapes
+
+## b) Plot results in space
+
+## c) Correlation between NDVI and Urbanization
+
+
+

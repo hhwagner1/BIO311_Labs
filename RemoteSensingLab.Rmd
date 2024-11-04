@@ -1,0 +1,406 @@
+---
+title: "Remote Sensing Lab"
+output: html_notebook
+---
+
+# 1. Introduction
+
+## a) Goals:
+
+- Understand how satellite imagery is converted into discrete or continuous raster data
+- Link satellite imagery and derived maps of a known landscape (around home)
+- Map characteristics of local landscape:
+  - Quantitative variable: NDVI (measure of live biomass)
+  - Categorical variable: LULC classification
+- Compare satellite imagery from different sensors (different spatial resolution)
+
+## b) Steps:
+
+- Extract satellite imagery around a point of interest
+- Display bands as true color and false color images
+- Raster calculation:
+  - NDVI
+  - Urbanization index (optional)
+- Supervised classification
+  - Define legend: what will be mapped?
+  - Create training set
+  - Apply to entire local landscape
+- Summarize landscape:
+  - Continuous: mean
+  - Discrete: percent of area
+- Compare results among students
+  - Rank local landscapes? (Positionality)
+  - Correlation between NDVI and Urbanization?
+
+## c) Sources: we will losely follow these tutorials:
+
+- https://www.r-bloggers.com/2024/01/an-overview-of-the-rsi-r-package-for-retrieving-satellite-imagery-and-calculating-spectral-indices/
+- https://urbanspatial.github.io/classifying_satellite_imagery_in_R/
+- https://docs.digitalearthafrica.org/en/latest/sandbox/notebooks/Real_world_examples/Urban_index_comparison.html (drop this part?)
+
+## d) Satellite data: 
+
+Landsat 8 data from EarthExplorer (USGS)
+
+- Note: may become unavailable after Aug 30, 2024?
+- Needs a (free) account
+- Instructions: https://gisgeography.com/usgs-earth-explorer-download-free-landsat-imagery/
+
+Sentinel data
+
+- Download instructions: https://gisgeography.com/how-to-download-sentinel-satellite-data/
+
+
+## e) R packages
+
+```{r}
+library(terra)
+library(here)
+library(tidyverse)
+library(sf)
+library(tmap)
+```
+
+## Alternative: package `rsi`
+
+```{r}
+remotes::install_github("Permian-Global-Research/rsi")
+library(rsi)
+```
+```{r}
+landsat8_14Aug2024 = get_landsat_imagery(
+    MyBuffer,
+    start_date = "2024-08-14",
+    end_date = "2024-08-15",
+    output_filename = tempfile(fileext = ".tif")
+)
+landsat8_14Aug2024 = terra::rast(landsat8_14Aug2024)
+```
+
+
+```{r}
+sentinel2_30June2024 = get_sentinel2_imagery(
+    MyBuffer,
+    start_date = "2024-05-30",
+    end_date = "2024-05-31",
+    output_filename = tempfile(fileext = ".tif")
+)
+sentinel2_30June2024 = terra::rast(sentinel2_30June2024)
+```
+
+```{r}
+sentinel2_12Sept2024 = get_sentinel2_imagery(
+    MyBuffer,
+    start_date = "2024-09-12",
+    end_date = "2024-09-13",
+    output_filename = tempfile(fileext = ".tif")
+)
+sentinel2_12Sept2024 = terra::rast(sentinel2_12Sept2024)
+```
+
+```{r}
+par(mfrow = c(1, 3))
+terra::plotRGB(landsat8_14Aug2024, r = 4, g = 3, b = 2, stretch = "lin")
+terra::plotRGB(sentinel2_30June2024, r = 4, g = 3, b = 2, stretch = "lin")
+terra::plotRGB(sentinel2_12Sept2024, r = 4, g = 3, b = 2, stretch = "lin")
+```
+Import formula to calculate NDVI
+
+```{r}
+ndvi = spectral_indices(download_indices = TRUE) %>%
+  filter(short_name == "NDVI")
+```
+
+Apply to each sentinel2 scene
+
+```{r}
+sentinel2_12Sept2024_ndvi = calculate_indices(
+    sentinel2_12Sept2024,
+    ndvi,
+    output_filename = tempfile(fileext = ".tif")
+)
+sentinel2_30June2024_ndvi = calculate_indices(
+    sentinel2_30June2024,
+    ndvi,
+    output_filename = tempfile(fileext = ".tif")
+)
+sentinel2_30June2024_ndvi
+```
+
+```{r}
+par(mfrow = c(1, 2))
+sentinel2_12Sept2024_ndvi_rast = terra::rast(sentinel2_12Sept2024_ndvi)
+sentinel2_30June2024_ndvi_rast = terra::rast(sentinel2_30June2024_ndvi)
+terra::plot(sentinel2_12Sept2024_ndvi_rast, range = c(-1, 1))
+terra::plot(sentinel2_30June2024_ndvi_rast, range = c(-1, 1))
+```
+Take difference in NDVI
+
+```{r}
+par(mfrow = c(1, 2))
+dif = sentinel2_12Sept2024_ndvi_rast - sentinel2_30June2024_ndvi_rast
+terra::plot(dif)
+hist(dif, main = "", xlab = "NDVI")
+```
+Stack rasters, label them, mask with buffer (i.e., set outside area to NA)
+
+```{r}
+stack_rast = terra::rast(list("NDVI 05.30"=sentinel2_30June2024_ndvi_rast,
+                              "NDVI 09.12"=sentinel2_12Sept2024_ndvi_rast))
+stack_rast = mask(stack_rast, MyBuffer)
+```
+
+
+```{r}
+terra::plot(stack_rast, range = c(-1, 1))
+```
+
+Calculate mean NDVI within buffer for each scene
+
+```{r}
+terra::global(stack_rast, mean, na.rm=TRUE)
+```
+
+
+# 2. Explore Landsat Imagery
+
+## a) Define area of interest (AOI)
+
+Import points, convert to spatial feature with correct CRS, transform to UTM zone 17 CRS.
+
+```{r}
+MyPoints <- read.csv("MyPoints.csv")
+MyPoints[1,2:3] <- c(43.66974504204339, -79.38948582208968)
+MyPoints.latlon <- sf::st_as_sf(MyPoints, coords=c("Longitude", "Latitude"),
+                                crs=4326)
+MyPoints.utm <- sf::st_transform(MyPoints.latlon, crs=32617)
+```
+
+Create buffer of 1000 m radius around nearest intersection (first point in MyPoints)
+
+```{r}
+MyBuffer <- sf::st_buffer(MyPoints.utm[1,], dist=1000)
+```
+
+Plot map to check location
+
+```{r}
+tmap_mode("view")
+tm_shape(MyBuffer) + tm_sf(border.col="red", alpha=0)
+```
+
+
+Import Landsat 8 scene
+
+```{r}
+datapath <- "data/Landsat8_14Aug2024"
+filelist <- list.files(datapath, full.names = TRUE, pattern = "T1_B")
+filelist <- filelist[which(is.na(str_extract(filelist, regex("B8.TIF"))))]
+Image_bands <- rast(filelist)
+names(Image_bands) <- as.character(sapply(names(Image_bands), function(x) substring(x, 42)))
+Image_bands
+```
+Description of bands
+
+```{r}
+Bands <- data.frame(Band=paste0("B", 1:11), 
+                    Description=c("Coastal/aerosol", 'Blue', 'Green',
+                       'Red', 'Near Infrared (NIR)','Shortwave Infrared (SWIR) 1',
+                       'Shortwave Infrared (SWIR) 2', 'Panchromatic', 'Cirrus',
+                       'Thermal Infrared (TIRS) 1', 'Thermal Infrared (TIRS) 2' ))
+Bands <- left_join(data.frame(Band=names(Image_bands)), Bands)
+Bands
+```
+
+# 3. Raster Calculations
+
+# 4. Supervised Classification
+
+See also this resource: https://gisgeography.com/image-classification-techniques-remote-sensing/
+Similar techniques are used in biological/medical imaging.
+
+
+
+```{r}
+library(mapedit)
+library(mapview)
+sentinel2_12Sept2024_brick <- raster::brick(sentinel2_12Sept2024)
+
+```
+Interactively select at least 5 points with tree cover
+
+```{r}
+Tree.points <- viewRGB(sentinel2_12Sept2024_brick, r = 4, g = 3, b = 2) %>% 
+  editMap()
+Tree.points <- Tree.points$finished$geometry %>% st_sf() %>% mutate(class = "Tree", id = 1)
+```
+
+Repeat for roads
+
+```{r}
+Road.points <- Tree.points %>% filter(is.na(id))
+Road.points <- viewRGB(sentinel2_12Sept2024_brick, r = 4, g = 3, b = 2) %>% 
+  editMap()
+Road.points <- Road.points$finished$geometry %>% st_sf() %>% mutate(class = "Road", id = 3)
+```
+
+Repeat for turf (tree-less green area)
+
+```{r}
+Turf.points <- Tree.points %>% filter(is.na(id))
+Turf.points <- viewRGB(sentinel2_12Sept2024_brick, r = 4, g = 3, b = 2) %>% 
+  editMap()
+Turf.points <- Turf.points$finished$geometry %>% st_sf() %>% mutate(class = "Turf", id = 2)
+```
+
+Repeat for buildings
+
+```{r}
+Building.points <- Tree.points %>% filter(is.na(id))
+Building.points <- viewRGB(sentinel2_12Sept2024_brick, r = 4, g = 3, b = 2) %>% 
+  editMap()
+Building.points <- Building.points$finished$geometry %>% st_sf() %>% mutate(class = "Building", id = 4)
+```
+
+Repeat for reflections?
+
+```{r}
+Reflect.points <- Tree.points %>% filter(is.na(id))
+Reflect.points <- viewRGB(sentinel2_12Sept2024_brick, r = 4, g = 3, b = 2) %>% 
+  editMap()
+Reflect.points <- Reflect.points$finished$geometry %>% st_sf() %>% mutate(class = "Reflection", id = 5)
+```
+
+Repeat for water (if present)
+
+```{r}
+Water.points <- viewRGB(sentinel2_12Sept2024_brick, r = 4, g = 3, b = 2) %>% 
+  editMap()
+if(length(Water.points$drawn) > 0)
+{
+  Water.points <- Water.points$finished$geometry %>% st_sf() %>% mutate(class = "Cloud", id = 9)
+}else{
+  Water.points <- Tree.points %>% filter(is.na(id))
+}
+```
+
+Repeat for clouds (if present)
+
+```{r}
+Cloud.points <- viewRGB(sentinel2_12Sept2024_brick, r = 4, g = 3, b = 2) %>% 
+  editMap()
+if(length(Cloud.points$drawn) > 0)
+{
+  Cloud.points <- Cloud.points$finished$geometry %>% st_sf() %>% mutate(class = "Cloud", id = 9)
+}else{
+  Cloud.points <- Tree.points %>% filter(is.na(id))
+}
+```
+
+```{r}
+training_points <- rbind(Tree.points, Turf.points, Road.points, Building.points, Reflect.points, Water.points, Cloud.points)
+
+```
+
+
+```{r}
+training_points <- as(training_points, 'Spatial')
+
+df <- raster::extract(sentinel2_12Sept2024_brick, training_points) %>%
+  round()
+```
+
+Check for points with NA values in bands, remove them from training set
+
+```{r}
+a <- which(is.na(apply(df,1,sum)))
+if(length(a) > 0)
+{
+  df <- df[!is.na(apply(df,1,sum)),]
+  training_points <-  training_points[-a,]
+}
+```
+
+```{r}
+profiles <- df %>% 
+  as.data.frame() %>% 
+  cbind(., training_points$id) %>% 
+  rename(id = "training_points$id") %>% 
+  na.omit() %>% 
+  group_by(id) %>% 
+  summarise(A = mean(A),
+            B = mean(B),
+            G = mean(G),
+            R = mean(R),
+            RE1 = mean(RE1),
+            RE2 = mean(RE2),
+            RE3 = mean(RE3),
+            N = mean(N),
+            N2 = mean(N2),
+            WV = mean(WV),
+            S1 = mean(S1),
+            S2 = mean(S2)) %>% 
+  mutate(id = case_when(id == 1 ~ "Tree",
+                        id == 2 ~ "Turf",
+                        id == 3 ~ "Road",
+                        id == 4 ~ "Building",
+                        id == 5 ~ "Reflect",
+                        id == 0 ~ "Water",
+                        id == 9 ~ "Cloud")) %>% 
+  as.data.frame()
+
+head(profiles)
+```
+
+
+```{r}
+profiles %>% 
+  select(-id) %>% 
+  gather() %>% 
+  mutate(class = rep(profiles$id, 12)) %>% 
+  mutate(class = factor(class, levels=profiles$id)) %>%
+  ggplot(., aes(x=value, group=as.factor(class), fill=as.factor(class))) + 
+  geom_density(alpha = 0.75) + 
+  geom_vline(data = . %>% group_by(class) %>% summarise(grp.mean = mean(value)),
+             aes(xintercept=grp.mean, color = class), linetype="dashed", size=1) +
+  scale_fill_manual(values=c('darkgreen', 'lightgreen', 'gray', 'red3','yellow', 'blue', 'white'), name = "class") +
+  scale_color_manual(values=c('darkgreen', 'lightgreen', 'gray', 'red3','yellow', 'blue', 'white')) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_line(color = "gray", size = 0.5),
+        panel.grid.minor = element_line(color = "gray", size = 0.5),
+        axis.ticks = element_blank()) +
+  labs(x = "Reflectance Value",
+       y = "Density",
+       title = "Density histograms of spectral profiles",
+       subtitle = "Vertical lines represent mean group reflectance values")
+```
+
+```{r}
+library(rpart)
+library(rpart.plot)
+df <- data.frame(training_points$class, df)
+
+model.class <- rpart(as.factor(training_points$class)~., data = df, method = 'class')
+
+#cart <- rpart(as.factor(training_points$class)~., data=df, method = 'class', minsplit = 5)
+rpart.plot(model.class, box.palette = 0, main = "Classification Tree")
+```
+
+```{r}
+pr <- predict(sentinel2_12Sept2024_brick, model.class, type ='class', progress = 'text') %>% 
+  raster::ratify()
+
+levels(pr) <- levels(pr)[[1]] %>%
+  mutate(legend = c("cloud","developed","undeveloped","water"))
+```
+
+
+# 5. Compare Results among students
+
+## a) Rank local landscapes
+
+## b) Plot results in space
+
+## c) Correlation between NDVI and Urbanization
+
+
