@@ -1,0 +1,270 @@
+---
+title: "Vector Data Lab: Reserve Allocation"
+output: html_notebook
+---
+
+# 0. Introduction
+
+## a) Goals:
+
+- Introduction to R package sf for spatial vector data
+- Get to know the main elements of GIS functionality: 
+  - Data import
+  - Data management and manipulation
+  - Data analysis
+  - Data visualization
+- Use these methods to document the change in land base of the MCFN
+  - How did the amount of land change over time?
+  - How did the quality of the land change over time?
+  - How did access to waterways change over time?
+  
+## b) Steps according to GIS functionality:
+
+1. **Data import**: 
+  - Aboriginal Lands of Canada Legislative Boundaries
+  - Canada Land Inventory
+  - Canvec 
+2. **Data manipulation**:
+  - Extract features and attributes
+  - Crop spatial extent
+  - Change coordinate reference system (CRS)
+  - Join datasets
+3. **Data analysis**:
+  - Area calculation
+  - Intersection
+  - Buffering
+4. **Data visualization**:
+  - Interactive maps with tmap
+  - Statistical figures with ggplot2
+
+  
+## c) Background on the history of the Mississaugas of the Credit First Nation (MCFN)
+
+- General overview of the MCFN: https://mncfn.ca/about-mncfn/community-profile/
+- Specific treaties: https://mncfn.ca/treaty-lands-territory/
+- Guidance on land acknowledgments: https://mncfn.ca/treaty-lands-territory/treaty-lands-and-territory-recognition-statements/
+
+## d) Background on the Indian Act (1876), the reserve system and First Nations governance
+
+  - The Indian Act defines a *band* as "a body of Indians”, **whose use of reserve lands, monies and other resources are managed by the federal government.** As of 2020, the Government of Canada recognized 619 First Nations (bands in the meaning of the Indian Act) in Canada. 
+  - The terms *band* and *Indians* are perceived as derogatory and should not be used except in direct connection to the Indian Act legislation.
+  - An *Indian Reserve* is a tract of land set aside under the Indian Act and treaty agreements for the *exclusive use* of an Indian band. **Reserve lands are not “owned” by bands but are held in trust for bands by the Crown.** 
+  - The Indian Act prescribes, among many other things, the **political system of band governance** (Chief and council, elections every two years, every four years since 2015). This was done to control the governance of local Indigenous populations. A key feature of the Indian Act is that Chief and Council are elected by the "band members", but are **accountable to Indigenous and Northern Affairs Canada!**
+  - In addition to band government, some First Nations recognize hereditary chiefs. These are leaders who have inherited their titles and governing powers from traditional ruling families. The Indian Act, however, only recognizes elected band leaders. **This means that some bands have two forms of leadership — elected and hereditary chiefs.**
+  - Today, the Department of Indigenous-Crown Relations and Northern Affairs oversees matters relating to bands, including social services. However, bands function as local governments, which means they manage many of their own affairs, including education	and infrastructure.
+  - Main source of this information: https://www.thecanadianencyclopedia.ca/en/article/band
+
+## e) Data sources
+
+**Aboriginal Lands of Canada Legislative Boundaries** (Government of Canada)
+
+- This dataset contains the following types of legislative boundaries:
+  - Indian reserves (created under the Indian Act, see below) 
+  - Land Claim Settlement Lands (mostly in Yukon, NW Territories and Nunavut)
+  - Indian Lands (special case: Kanesatake Mohawk interim land base)
+
+**Canada Land Inventory** (CLI; Government of Canada)
+
+- Purpose: this dataset was established between 1963 - 1995 to map land capability for agriculture, forestry, recreation, and wildlife (ungulates and waterfowl) across Canada.
+- Description of methodology: https://www.alc.gov.bc.ca/assets/alc/assets/library/agricultural-capability/canada_land_inventory_soil_capability_classification_for_agriculture_1972.pdf
+- Built-up areas were not mapped.
+- Since 1995, the Department of Agriculture took over the land capability rating for agriculture.
+- The CLI in this modified form consists of a soil survey with rankings from 1 to 7, with Class 1 soil having no limitations for arable crop production and Class 7 having no capability for agricultural activities. 
+- Classes 1-3 are considered prime agricultural land, and are protected by land use policies in certain provinces, including Ontario.
+- These classes are mapped at a map scale of 1:250,000 (where 1 cm on the map represents 2.5 km).
+- Main source of the above information: https://en.wikipedia.org/wiki/Canada_Land_Inventory
+
+**CanVec** (Government of Canada) 
+
+- Vector-based digital cartographic reference product produced by Natural Resources Canada.
+- CanVec contains more than 60 topographic features classes organized into 8 themes: 
+  - Transport Features: roads, rail, etc.
+  - Administrative Features: jurisdictional boundaries
+  - Hydro Features: lakes, rivers and glaciers
+  - Land Features: shorelines, wooded areas, saturated soils and landforms
+  - Manmade Features: construction and land use
+  - Elevation Features: elevation contour lines and elevation points
+  - Resource Management Features: mines, energy, and communication networks
+  - Toponymic Features: map labels (place names)
+
+
+
+
+## f) Required R packages
+
+```{r}
+library(sf)
+library(tmap)
+library(ggplot2)
+library(dplyr)
+```
+
+# 1. Data import 
+
+## 1.1. Territories
+
+Here, we open the dataset with territories and extract only the territory of the Mississaugas of the Credit First Nation:
+
+```{r}
+#Territories <- readRDS("data/Territories.crop.rds") 
+Territory_MCFN <- readRDS("data/Territories.crop.rds") %>% 
+  filter(Name=="Mississaugas of the Credit First Nation")
+
+```
+
+Display the territory on an interactive map:
+
+```{r}
+tmap_mode("view")
+tm_shape(Territory_MCFN) + tm_sf(alpha=0, border.col="red") +
+  tm_shape(ALC) + tm_sf("red") +
+  tm_shape(Treaties,) + tm_sf(alpha=0.3)
+```
+
+## 1.2. Aboriginal Lands of Canada Legislative Boundaries
+
+These data have already been prepared for import. Again, we only extract the reserve of the MCFN. 
+
+```{r}
+Reserve_MCFN <- readRDS("data/AboriginalLands.sf.rds") %>% 
+  filter(NAME1=="NEW CREDIT INDIAN RESERVE NO. 40A") 
+
+Reserve_SixNations <- readRDS("data/AboriginalLands.sf.rds") %>% 
+  filter(NAME1=="SIX NATIONS INDIAN RESERVE NO. 40" | 
+           NAME1=="GLEBE FARM INDIAN RESERVE NO. 40B")
+```
+
+Treaties: 
+
+These data have already been prepared for import. We only extract those that overlap with the territory of the MCFN.
+
+```{r}
+Treaties <- sf::st_intersection(readRDS("data/Treaties.sf.rds"), Territory_MCFN) 
+Treaties$Year <- c(1805, 1797, 1784, 1836, 1818, 1805, 1793, 1792, 1781, 1818, 1923, 1806, 1827, 1820, 1820)
+Treaties <- Treaties %>% select(Name, ID, Year, color) %>% arrange(Year) 
+Treaties$Nation <- "MCFN"
+Treaties$Nation[c(2, 4)] <- "Six Nations"
+Treaties$Nation[c(9, 13,14, 15)] <- "Other"
+Treaties$Area <- st_area(Treaties)
+```
+
+
+## 1.3. Canada Land Inventory
+
+These data have already been prepared for import
+
+```{r}
+Soil <- sf::st_intersection(readRDS("data/Soil.dissolved.rds"), Territory_MCFN) %>%
+  select(CLI1)
+
+
+#tm_shape(Soil) + tm_sf()
+```
+
+## 1.4. Canvec: Hydro Features (Ontario, map scale 1:250,000) 
+
+Shapefiles downloaded from: https://open.canada.ca/data/en/dataset/8ba2aa2a-7bb9-4448-b4d7-f164409fe056
+
+We will use the following shapefiles:
+
+- waterbody_2.shp: lakes etc.
+- watercourse_1.shp: rivers etc.
+
+```{r}
+Waterbody <-  sf::st_read("data/canvec_250K_ON_Hydro/waterbody_2.shp")
+Waterbody <- sf::st_transform(Waterbody, crs=st_crs(Territory_MCFN))
+Waterbody <- sf::st_intersection(Waterbody, Territory_MCFN) 
+Waterbody$Area <- st_area(Waterbody) 
+Waterbody <- Waterbody %>% arrange(desc(Area))
+```
+
+```{r}
+Watercourse <-  sf::st_read("data/canvec_250K_ON_Hydro/watercourse_1.shp")
+Watercourse <- sf::st_transform(Watercourse, crs=st_crs(Territory_MCFN))
+Watercourse <- sf::st_intersection(Watercourse, Territory_MCFN) 
+```
+
+
+# 2. Data manipulation
+
+## 2.1. Extract features and attributes
+## 2.2. Crop spatial extent
+## 2.3. Change coordinate reference system (CRS)
+## 2.4. Join datasets
+  
+# 3. Data analysis
+
+## 3.1. Area calculation
+
+```{r}
+Area <- rbind(data.frame(Name="Territory_MCFN (terrestrial)", Year=1763, 
+                         Area=st_area(Territory_MCFN) - sum(Waterbody$Area[1:3])),
+              st_drop_geometry(Treaties) %>% 
+                filter(Nation=="MCFN", Name != "Toronto Purchase") %>% 
+                arrange(Year) %>% select(Name, Year, Area),
+              data.frame(Name="Unceded territory", Year=NA, Area=NA),
+              data.frame(Name="Reserve_MCFN", Year=1847, Area=st_area(Reserve_MCFN)))
+Area[Area$Name=="Unceded territory", ]$Area <- Area$Area[1] - sum(Area$Area[-c(1,10)])
+Area[Area$Name=="Treaty 3, 1792", ]$Area <- Area[Area$Name=="Treaty 3, 1792", ]$Area + 
+  st_area(Treaties %>% filter(Name=="The Simcoe Patent – Treaty 4, 1793"))
+Area <- Area %>% mutate(Percent.area = Area/max(Area)) 
+#Area$Remaining[nrow(Area):1] <- c(cumsum(Area$Percent.area[nrow(Area):2]), Area$Percent.area[1])
+Area
+```
+
+## 3.2. Intersection
+
+How much of each land suitability class does the MCFN reserve contain?
+
+```{r}
+Soil_Reserve_MCFN <- st_intersection(Soil, Reserve_MCFN) %>% select(CLI1)
+Soil_Reserve_MCFN$CLI1 <- factor(Soil_Reserve_MCFN$CLI1, levels=c(0:7, "O", "W"))
+Soil_Reserve_MCFN$Area <- st_area(Soil_Reserve_MCFN)
+Soil_Reserve_MCFN$Percent.area <- Soil_Reserve_MCFN$Area/sum(Soil_Reserve_MCFN$Area)
+Soil_Reserve_MCFN
+```
+```{r}
+Soil_Territory_MCFN <- st_intersection(Soil, Territory_MCFN) %>% select(CLI1) %>% st_make_valid()
+Soil_Territory_MCFN$CLI1 <- factor(Soil_Territory_MCFN$CLI1, levels=c(0:7, "O", "W"))
+Soil_Territory_MCFN$Area <- st_area(Soil_Territory_MCFN)
+Soil_Territory_MCFN$Percent.area <- Soil_Territory_MCFN$Area/sum(Soil_Territory_MCFN$Area)
+Soil_Territory_MCFN
+```
+
+Compare proportions of soil classes between territory and reserve
+
+```{r}
+library(units)
+
+Soil.distribution <- rbind(st_drop_geometry(Soil_Territory_MCFN) %>% 
+                             mutate(Reference="Territory MCFN"), 
+                           st_drop_geometry(Soil_Reserve_MCFN) %>% 
+                             mutate(Reference="Reserve MCFN")) %>%
+  mutate(Reference=factor(Reference, levels=c("Territory MCFN", "Reserve MCFN"))) %>%
+  mutate(Percent.area=drop_units(Percent.area))
+```
+
+```{r}
+#library(RColorBrewer)
+library(rcartocolor)
+
+#myPalette <- c("grey", rcartocolor::carto_pal(7, "Earth")[7:1], "lightblue", "cornflowerblue")
+#myPalette <- c("grey", rcartocolor::carto_pal(7, "Geyser"), "lightblue", "cornflowerblue")
+myPalette <- c("lavenderblush3", "#008080", "#70A494", "#B4C8A8", "#F6EDBD", 
+               "#EDBB8A", "#DE8A5A", "#CA562C", "azure4", "cornflowerblue")
+
+
+ggplot(Soil.distribution, aes(fill=CLI1, y=Percent.area, x=Reference)) + 
+    geom_bar(position="fill", stat="identity") +
+    scale_fill_manual(values=myPalette) + ylab("Percent Area")
+```
+
+
+
+## 3.3. Buffering
+  
+# 4. Data visualization
+
+## 4.1. Interactive maps with tmap
+## 4.2. Statistical figures with ggplot2
+
